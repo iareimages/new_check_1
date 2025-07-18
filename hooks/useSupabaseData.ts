@@ -84,71 +84,134 @@ export function useSupabaseData(user: User | null) {
     }
   }
 
-
-async function getPersonalizedSongs(userId: string, currentSong: Song, listenedSongs?: Set<string>) {
-  // 1. Fetch all songs
-  const { data: songs } = await supabase.from('songs').select('*');
-  if (!songs) return [];
-
-  // 2. Fetch listening history
-  const { data: history } = await supabase
-    .from('history')
-    .select('*')
-    .eq('user_id', userId);
-  const historyMap = new Map(history?.map((h) => [h.song_id, h.minutes_listened]));
-
-  const recommendations = songs
-    .filter((song) => {
-      // Exclude current song
-      if (song.file_id === currentSong.file_id) return false;
+  // Get personalized songs with proper error handling and filtering
+  const getPersonalizedSongs = async (userId: string, currentSong: Song, listenedSongs?: Set<string>): Promise<Song[]> => {
+    try {
+      console.log('🎵 Fetching personalized songs for:', currentSong.name);
+      console.log('🎵 Listened songs count:', listenedSongs?.size || 0);
       
-      // Exclude listened songs if provided
-      if (listenedSongs && listenedSongs.has(song.file_id.toString())) {
-        console.log(`🚫 Excluding listened song: ${song.name} by ${song.artist}`);
-        return false;
+      // 1. Fetch all songs from database
+      const { data: songsData, error: songsError } = await supabase
+        .from('songs')
+        .select('*');
+      
+      if (songsError) {
+        console.error('❌ Error fetching songs for personalization:', songsError);
+        return [];
       }
       
-      return true;
-    })
-    .map((song) => {
-      let score = 0;
-
-      // 🎯 Tag Match
-      const matchingTags = song.tags.filter((tag: string) =>
-        currentSong.tags.includes(tag)
-      );
-      score += matchingTags.length * 10;
-
-      // 👤 Artist Match
-      if (song.artist === currentSong.artist) {
-        score += 20;
+      if (!songsData || songsData.length === 0) {
+        console.warn('⚠️ No songs found in database');
+        return [];
       }
 
-      // ⏱ Listening History Boost
-      const listenedMinutes = historyMap.get(song.file_id) || 0;
-      score += listenedMinutes;
+      // 2. Fetch user's listening history
+      const { data: historyData, error: historyError } = await supabase
+        .from('history')
+        .select('song_id, minutes_listened')
+        .eq('user_id', userId);
+      
+      if (historyError) {
+        console.error('❌ Error fetching history:', historyError);
+      }
+      
+      const historyMap = new Map<number, number>();
+      if (historyData) {
+        historyData.forEach(h => historyMap.set(h.song_id, h.minutes_listened || 0));
+      }
 
-      // ❤️ Likes Boost
-      score += (song.likes || 0) / 100;
+      // 3. Get user's liked songs
+      const { data: likedData } = await supabase
+        .from('liked_songs')
+        .select('song_id')
+        .eq('user_id', userId);
+      
+      const userLikedSongs = new Set<number>();
+      if (likedData) {
+        likedData.forEach(item => userLikedSongs.add(item.song_id));
+      }
 
-      // 👁 Views Boost
-      score += (song.views || 0) / 1000;
+      // 4. Filter and score songs
+      const availableSongs = songsData.filter((song) => {
+        // Exclude current song
+        if (song.file_id === currentSong.file_id) {
+          return false;
+        }
+        
+        // Exclude listened songs if provided
+        if (listenedSongs && listenedSongs.has(song.file_id.toString())) {
+          console.log(`🚫 Excluding listened song: ${song.name} by ${song.artist}`);
+          return false;
+        }
+        
+        return true;
+      });
 
-      // Add some randomness to avoid always getting the same recommendations
-      score += Math.random() * 5;
-      return { song, score };
-    });
+      console.log(`🎵 Available songs after filtering: ${availableSongs.length}`);
 
-  // 3. Sort and return top 5 initially
-  const top5 = recommendations
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 5)
-    .map((entry) => entry.song);
+      if (availableSongs.length === 0) {
+        console.warn('⚠️ No available songs after filtering');
+        return [];
+      }
 
-  console.log('🎵 Personalized Top 5 Songs (excluding listened):', top5.map(s => `${s.name} by ${s.artist}`));
-  console.log('🎵 Total listened songs excluded:', listenedSongs ? listenedSongs.size : 0);
-  return top5;
-}
+      // 5. Score and sort songs
+      const scoredSongs = availableSongs.map((song) => {
+        let score = 0;
+
+        // Tag matching (highest priority)
+        const matchingTags = song.tags?.filter((tag: string) =>
+          currentSong.tags?.includes(tag)
+        ) || [];
+        score += matchingTags.length * 15;
+
+        // Artist matching
+        if (song.artist === currentSong.artist) {
+          score += 25;
+        }
+
+        // Language matching
+        if (song.language === currentSong.language) {
+          score += 10;
+        }
+
+        // Listening history boost
+        const listenedMinutes = historyMap.get(song.file_id) || 0;
+        score += Math.min(listenedMinutes * 2, 20); // Cap at 20 points
+
+        // Popularity boost (likes and views)
+        score += Math.log(1 + (song.likes || 0)) * 2;
+        score += Math.log(1 + (song.views || 0)) * 1;
+
+        // Liked songs boost
+        if (userLikedSongs.has(song.file_id)) {
+          score += 8;
+        }
+
+        // Add controlled randomness to avoid repetition
+        score += Math.random() * 3;
+
+        return { 
+          song: convertDatabaseSong(song, userLikedSongs.has(song.file_id)), 
+          score 
+        };
+      });
+
+      // 6. Sort by score and return top recommendations
+      const recommendations = scoredSongs
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 10) // Get more songs to have a buffer
+        .map(entry => entry.song);
+
+      console.log('🎵 Personalized recommendations:', recommendations.slice(0, 5).map(s => `${s.name} by ${s.artist}`));
+      console.log('🎵 Total available songs:', availableSongs.length);
+      
+      return recommendations;
+      
+    } catch (error) {
+      console.error('❌ Error in getPersonalizedSongs:', error);
+      return [];
+    }
+  };
 
   // Fetch user playlists
   const fetchPlaylists = async () => {

@@ -165,10 +165,19 @@ useEffect(() => {
   // Set last played song as current song when data loads (only once and if not dismissed)
 useEffect(() => {
   const loadLastPlayedImage = async () => {
-   if (user && lastPlayedSong && !hasSetLastPlayedSong && !lastPlayedSongDismissed) {
-      const initialRecs = await getPersonalizedSongs(user.id, lastPlayedSong, listenedSongs);
-      const filtered = initialRecs.filter(song => !playedSongs.has(song.file_id));
-      setPersonalizedList([lastPlayedSong, ...filtered.slice(0, 5)]);
+    if (user && lastPlayedSong && !hasSetLastPlayedSong && !lastPlayedSongDismissed) {
+      try {
+        console.log('🎵 Loading initial personalized songs for last played song');
+        const initialRecs = await getPersonalizedSongs(user.id, lastPlayedSong, listenedSongs);
+        const filtered = initialRecs.filter(song => !playedSongs.has(song.file_id.toString()));
+        const newPersonalizedList = [lastPlayedSong, ...filtered.slice(0, 4)];
+        setPersonalizedList(newPersonalizedList);
+        console.log('✅ Initial personalized list set:', newPersonalizedList.length, 'songs');
+      } catch (error) {
+        console.error('❌ Error loading initial personalized songs:', error);
+        setPersonalizedList([lastPlayedSong]);
+      }
+      
       setCurrentSong(lastPlayedSong);
       setHasSetLastPlayedSong(true);
 
@@ -191,7 +200,7 @@ useEffect(() => {
   };
 
   loadLastPlayedImage();
-}, [lastPlayedSong, currentSong, hasSetLastPlayedSong, lastPlayedSongDismissed, imageUrls]);
+}, [lastPlayedSong, hasSetLastPlayedSong, lastPlayedSongDismissed, user, getPersonalizedSongs]);
 
 
 const handleSongPlay = async (song: Song) => {
@@ -210,16 +219,24 @@ const handleSongPlay = async (song: Song) => {
 
   setPlayedSongs((prev) => {
     const updated = new Set(prev);
-    updated.add(String(song.file_id));
+    updated.add(song.file_id.toString());
     return updated;
   });
 
   if (user) {
-    const recs = await getPersonalizedSongs(user.id, song, listenedSongs);
-    const filtered = recs.filter(s => !playedSongs.has(s.file_id));
-    const newPersonalizedList = [song, ...filtered.slice(0, 4)]; // Get 4 more songs for total of 5
-    setPersonalizedList(newPersonalizedList);
-    setCurrentSongIndex(0); // Reset to first song
+    try {
+      console.log('🎵 Fetching personalized songs for:', song.name);
+      const recs = await getPersonalizedSongs(user.id, song, listenedSongs);
+      const filtered = recs.filter(s => !playedSongs.has(s.file_id.toString()));
+      const newPersonalizedList = [song, ...filtered.slice(0, 4)];
+      setPersonalizedList(newPersonalizedList);
+      setCurrentSongIndex(0);
+      console.log('✅ New personalized list set:', newPersonalizedList.length, 'songs');
+    } catch (error) {
+      console.error('❌ Error fetching personalized songs:', error);
+      setPersonalizedList([song]);
+      setCurrentSongIndex(0);
+    }
   }
 };
 
@@ -282,7 +299,7 @@ const handlePrevious = () => {
 
       setPlayedSongs((prev) => {
         const updated = new Set(prev);
-        updated.add(String(prevSong.file_id));
+        updated.add(nextSong.file_id.toString());
         return updated;
       });
 
@@ -390,13 +407,14 @@ const handleNext = async () => {
     try {
       const newRecs = await getPersonalizedSongs(user.id, currentSong, listenedSongs);
       const filtered = newRecs.filter(song => 
-        !playedSongs.has(song.file_id.toString()) && 
+        !playedSongs.has(song.file_id.toString()) &&
+        !listenedSongs.has(song.file_id.toString()) &&
         !personalizedList.some(existing => existing.file_id === song.file_id)
       );
       
       if (filtered.length > 0) {
         setPersonalizedList(prev => [...prev, ...filtered.slice(0, 5)]);
-        console.log('✅ Added more songs to personalized list');
+        console.log('✅ Added', filtered.slice(0, 5).length, 'more songs to personalized list');
       }
     } catch (error) {
       console.error('❌ Error fetching more songs:', error);
@@ -439,40 +457,52 @@ const handleNext = async () => {
   } else {
     // If we've reached the end of personalized list, get new recommendations
     if (user && currentSong) {
-      const newRecs = await getPersonalizedSongs(user.id, currentSong, listenedSongs);
-      const filtered = newRecs.filter(song => !playedSongs.has(song.file_id));
-      
-      if (filtered.length > 0) {
-        const nextSong = filtered[0];
-        setCurrentSong(nextSong);
-        setIsPlaying(true);
-        setLastPlayedSongDismissed(false);
-        recordListeningHistory(nextSong.id);
+      try {
+        console.log('🔄 Fetching new recommendations at end of list');
+        const newRecs = await getPersonalizedSongs(user.id, currentSong, listenedSongs);
+        const filtered = newRecs.filter(song => 
+          !playedSongs.has(song.file_id.toString()) &&
+          !listenedSongs.has(song.file_id.toString())
+        );
         
-        // Add to listened songs and log
-        setListenedSongs(prev => {
-          const newSet = new Set(prev);
-          newSet.add(nextSong.file_id.toString());
-          console.log('🎵 Listened Songs List:', Array.from(newSet));
-          return newSet;
-        });
-        
-        // Create new personalized list starting with this song
-        const newPersonalizedList = [nextSong, ...filtered.slice(1, 5)];
-        setPersonalizedList(newPersonalizedList);
-        setCurrentSongIndex(0);
-        
-        setPlayedSongs((prev) => {
-          const updated = new Set(prev);
-          updated.add(String(nextSong.file_id));
-          return updated;
-        });
-        
-        // Preload image
-        if (!imageUrls[nextSong.img_id]) {
-          const newUrl = `/api/image-proxy?fileid=${nextSong.img_id}`;
-          setImageUrls(prev => ({ ...prev, [nextSong.img_id]: newUrl }));
+        if (filtered.length > 0) {
+          const nextSong = filtered[0];
+          updated.add(nextSong.file_id.toString());
+          setIsPlaying(true);
+          setLastPlayedSongDismissed(false);
+          recordListeningHistory(nextSong.id);
+          
+          // Add to listened songs and log
+          setListenedSongs(prev => {
+            const newSet = new Set(prev);
+            newSet.add(nextSong.file_id.toString());
+            console.log('🎵 Listened Songs List:', Array.from(newSet));
+            return newSet;
+          });
+          
+          // Create new personalized list starting with this song
+          const newPersonalizedList = [nextSong, ...filtered.slice(1, 5)];
+          setPersonalizedList(newPersonalizedList);
+          setCurrentSongIndex(0);
+          
+          setPlayedSongs((prev) => {
+            const updated = new Set(prev);
+            updated.add(nextSong.file_id.toString());
+            return updated;
+          });
+          
+          // Preload image
+          if (!imageUrls[nextSong.img_id]) {
+            const newUrl = `/api/image-proxy?fileid=${nextSong.img_id}`;
+            setImageUrls(prev => ({ ...prev, [nextSong.img_id]: newUrl }));
+          }
+          
+          console.log('✅ New recommendations loaded:', newPersonalizedList.length, 'songs');
+        } else {
+          console.warn('⚠️ No more recommendations available');
         }
+      } catch (error) {
+        console.error('❌ Error fetching new recommendations:', error);
       }
     }
   }
