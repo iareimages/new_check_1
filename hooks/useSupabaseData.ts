@@ -12,6 +12,126 @@ export function useSupabaseData(user: User | null) {
   const [currentSongStartTime, setCurrentSongStartTime] = useState<Date | null>(null)
   const currentSongRef = useRef<string | null>(null)
 
+  // Get personalized songs based on user's actual listening preferences
+  const getSmartPersonalizedSongs = async (
+    userId: string, 
+    listenedSongsInBatch: Song[], 
+    excludeSongs: Set<string>
+  ): Promise<Song[]> => {
+    try {
+      console.log('🧠 Fetching smart personalized songs based on listening behavior');
+      console.log('🎵 Songs user actually listened to:', listenedSongsInBatch.map(s => s.name));
+      
+      if (listenedSongsInBatch.length === 0) {
+        console.log('⚠️ No listened songs in batch, falling back to regular personalization');
+        return [];
+      }
+
+      // Extract tags and artists from listened songs
+      const preferredTags = new Set<string>();
+      const preferredArtists = new Set<string>();
+      
+      listenedSongsInBatch.forEach(song => {
+        song.tags?.forEach(tag => preferredTags.add(tag.toLowerCase()));
+        preferredArtists.add(song.artist.toLowerCase());
+      });
+
+      console.log('🏷️ Preferred tags:', Array.from(preferredTags));
+      console.log('🎤 Preferred artists:', Array.from(preferredArtists));
+
+      // Fetch all songs from database
+      const { data: songsData, error: songsError } = await supabase
+        .from('songs')
+        .select('*');
+      
+      if (songsError) {
+        console.error('❌ Error fetching songs for smart personalization:', songsError);
+        return [];
+      }
+      
+      if (!songsData || songsData.length === 0) {
+        console.warn('⚠️ No songs found in database');
+        return [];
+      }
+
+      // Get user's liked songs
+      const { data: likedData } = await supabase
+        .from('liked_songs')
+        .select('song_id')
+        .eq('user_id', userId);
+      
+      const userLikedSongs = new Set<number>();
+      if (likedData) {
+        likedData.forEach(item => userLikedSongs.add(item.song_id));
+      }
+
+      // Filter and score songs based on listening preferences
+      const availableSongs = songsData.filter((song) => {
+        return !excludeSongs.has(song.file_id.toString());
+      });
+
+      console.log(`🎵 Available songs for smart recommendations: ${availableSongs.length}`);
+
+      if (availableSongs.length === 0) {
+        console.warn('⚠️ No available songs after filtering');
+        return [];
+      }
+
+      // Score songs based on user's listening preferences
+      const scoredSongs = availableSongs.map((song) => {
+        let score = 0;
+
+        // High priority: Tag matching with listened songs
+        const songTags = song.tags?.map(tag => tag.toLowerCase()) || [];
+        const matchingTags = songTags.filter(tag => preferredTags.has(tag));
+        score += matchingTags.length * 25; // Higher weight for tag matching
+
+        // High priority: Artist matching with listened songs
+        if (preferredArtists.has(song.artist.toLowerCase())) {
+          score += 30; // Higher weight for artist matching
+        }
+
+        // Medium priority: Same language as listened songs
+        const listenedLanguages = listenedSongsInBatch.map(s => s.language);
+        if (listenedLanguages.includes(song.language)) {
+          score += 15;
+        }
+
+        // Lower priority: General popularity
+        score += Math.log(1 + (song.likes || 0)) * 2;
+        score += Math.log(1 + (song.views || 0)) * 1;
+
+        // Bonus for liked songs
+        if (userLikedSongs.has(song.file_id)) {
+          score += 10;
+        }
+
+        // Add small randomness to avoid repetition
+        score += Math.random() * 2;
+
+        return { 
+          song: convertDatabaseSong(song, userLikedSongs.has(song.file_id)), 
+          score 
+        };
+      });
+
+      // Sort by score and return top recommendations
+      const recommendations = scoredSongs
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 15) // Get more songs for variety
+        .map(entry => entry.song);
+
+      console.log('🧠 Smart recommendations based on listening behavior:', 
+        recommendations.slice(0, 5).map(s => `${s.name} by ${s.artist}`));
+      
+      return recommendations;
+      
+    } catch (error) {
+      console.error('❌ Error in getSmartPersonalizedSongs:', error);
+      return [];
+    }
+  };
+
   // Convert database song to UI song format
   const convertDatabaseSong = (dbSong: DatabaseSong, isLiked: boolean = false): Song => ({
     file_id: dbSong.file_id,
@@ -609,6 +729,7 @@ try {
       fetchSongs()
       fetchPlaylists()
     },
-    getPersonalizedSongs
+    getPersonalizedSongs,
+    getSmartPersonalizedSongs
   }
 }

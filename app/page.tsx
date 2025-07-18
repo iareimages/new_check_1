@@ -36,7 +36,8 @@ function MusicPlayerContent() {
     removeSongFromPlaylist,
     recordListeningHistory,
     stopCurrentSongTracking,
-    getPersonalizedSongs
+    getPersonalizedSongs,
+    getSmartPersonalizedSongs
   } = useSupabaseData(user);
   
   const {
@@ -75,6 +76,11 @@ function MusicPlayerContent() {
   const [currentSongIndex, setCurrentSongIndex] = useState<number>(0);
   const [listenedSongs, setListenedSongs] = useState<Set<string>>(new Set());
   const [isFetchingMore, setIsFetchingMore] = useState(false);
+  
+  // Smart recommendation system state
+  const [currentBatchListenedSongs, setCurrentBatchListenedSongs] = useState<Song[]>([]);
+  const [songStartTime, setSongStartTime] = useState<Date | null>(null);
+  const [batchStartIndex, setBatchStartIndex] = useState(0);
   
 const loadMoreSongs = () => {
   setDisplayCount(prev => prev + 15);
@@ -204,10 +210,30 @@ useEffect(() => {
 
 
 const handleSongPlay = async (song: Song) => {
+  // Record if previous song was listened to (>20 seconds)
+  if (currentSong && songStartTime) {
+    const listenDuration = (new Date().getTime() - songStartTime.getTime()) / 1000;
+    if (listenDuration > 20) {
+      console.log(`✅ User listened to "${currentSong.name}" for ${listenDuration.toFixed(1)} seconds`);
+      setCurrentBatchListenedSongs(prev => {
+        const exists = prev.some(s => s.file_id === currentSong.file_id);
+        if (!exists) {
+          const updated = [...prev, currentSong];
+          console.log('🎵 Current batch listened songs:', updated.map(s => s.name));
+          return updated;
+        }
+        return prev;
+      });
+    } else {
+      console.log(`⏭️ User skipped "${currentSong.name}" after ${listenDuration.toFixed(1)} seconds`);
+    }
+  }
+
   setCurrentSong(song);
   setIsPlaying(true);
   setLastPlayedSongDismissed(false);
   recordListeningHistory(song.id);
+  setSongStartTime(new Date()); // Track when this song started
 
   // Add to listened songs and log
   setListenedSongs(prev => {
@@ -231,11 +257,15 @@ const handleSongPlay = async (song: Song) => {
       const newPersonalizedList = [song, ...filtered.slice(0, 4)];
       setPersonalizedList(newPersonalizedList);
       setCurrentSongIndex(0);
+      setBatchStartIndex(0);
+      setCurrentBatchListenedSongs([]); // Reset batch for new song selection
       console.log('✅ New personalized list set:', newPersonalizedList.length, 'songs');
     } catch (error) {
       console.error('❌ Error fetching personalized songs:', error);
       setPersonalizedList([song]);
       setCurrentSongIndex(0);
+      setBatchStartIndex(0);
+      setCurrentBatchListenedSongs([]);
     }
   }
 };
@@ -275,6 +305,23 @@ const handleSongPlay = async (song: Song) => {
   };
 
 const handlePrevious = () => {
+  // Record if current song was listened to before going to previous
+  if (currentSong && songStartTime) {
+    const listenDuration = (new Date().getTime() - songStartTime.getTime()) / 1000;
+    if (listenDuration > 20) {
+      console.log(`✅ User listened to "${currentSong.name}" for ${listenDuration.toFixed(1)} seconds`);
+      setCurrentBatchListenedSongs(prev => {
+        const exists = prev.some(s => s.file_id === currentSong.file_id);
+        if (!exists) {
+          const updated = [...prev, currentSong];
+          console.log('🎵 Current batch listened songs:', updated.map(s => s.name));
+          return updated;
+        }
+        return prev;
+      });
+    }
+  }
+
   if (!currentSong) return;
 
   // Check if there's a previous song in the personalized list
@@ -288,6 +335,7 @@ const handlePrevious = () => {
       setIsPlaying(true);
       setLastPlayedSongDismissed(false);
       recordListeningHistory(prevSong.id);
+      setSongStartTime(new Date());
 
       // Add to listened songs and log
       setListenedSongs(prev => {
@@ -299,7 +347,7 @@ const handlePrevious = () => {
 
       setPlayedSongs((prev) => {
         const updated = new Set(prev);
-        updated.add(nextSong.file_id.toString());
+        updated.add(prevSong.file_id.toString());
         return updated;
       });
 
@@ -364,6 +412,25 @@ const handleLoadedMetadata = async () => {
 
 
 const handleNext = async () => {
+  // Record if current song was listened to before going to next
+  if (currentSong && songStartTime) {
+    const listenDuration = (new Date().getTime() - songStartTime.getTime()) / 1000;
+    if (listenDuration > 20) {
+      console.log(`✅ User listened to "${currentSong.name}" for ${listenDuration.toFixed(1)} seconds`);
+      setCurrentBatchListenedSongs(prev => {
+        const exists = prev.some(s => s.file_id === currentSong.file_id);
+        if (!exists) {
+          const updated = [...prev, currentSong];
+          console.log('🎵 Current batch listened songs:', updated.map(s => s.name));
+          return updated;
+        }
+        return prev;
+      });
+    } else {
+      console.log(`⏭️ User skipped "${currentSong.name}" after ${listenDuration.toFixed(1)} seconds`);
+    }
+  }
+
   if (!currentSong) return;
 
   // Check if there's a song in the queue first
@@ -373,6 +440,7 @@ const handleNext = async () => {
     setIsPlaying(true);
     setLastPlayedSongDismissed(false);
     recordListeningHistory(nextQueueSong.id);
+    setSongStartTime(new Date());
     
     // Add to listened songs and log
     setListenedSongs(prev => {
@@ -399,13 +467,27 @@ const handleNext = async () => {
     return;
   }
 
-  // Check if we're at the second-to-last song and need to fetch more
+  // Check if we're at the second-to-last song and need to fetch smart recommendations
   if (currentSongIndex === personalizedList.length - 2 && !isFetchingMore && user && currentSong) {
-    console.log('🔄 Fetching more songs at second-to-last position...');
+    console.log('🧠 At second-to-last song, checking for smart recommendations...');
     setIsFetchingMore(true);
     
     try {
-      const newRecs = await getPersonalizedSongs(user.id, currentSong, listenedSongs);
+      let newRecs: Song[] = [];
+      
+      // If we have songs that user actually listened to in current batch, use smart recommendations
+      if (currentBatchListenedSongs.length > 0) {
+        console.log('🧠 Using smart recommendations based on listened songs');
+        newRecs = await getSmartPersonalizedSongs(
+          user.id, 
+          currentBatchListenedSongs, 
+          new Set([...Array.from(listenedSongs), ...personalizedList.map(s => s.file_id.toString())])
+        );
+      } else {
+        console.log('🎵 No listened songs in batch, using regular recommendations');
+        newRecs = await getPersonalizedSongs(user.id, currentSong, listenedSongs);
+      }
+      
       const filtered = newRecs.filter(song => 
         !playedSongs.has(song.file_id.toString()) &&
         !listenedSongs.has(song.file_id.toString()) &&
@@ -414,10 +496,10 @@ const handleNext = async () => {
       
       if (filtered.length > 0) {
         setPersonalizedList(prev => [...prev, ...filtered.slice(0, 5)]);
-        console.log('✅ Added', filtered.slice(0, 5).length, 'more songs to personalized list');
+        console.log('✅ Added', filtered.slice(0, 5).length, 'smart recommendations to personalized list');
       }
     } catch (error) {
-      console.error('❌ Error fetching more songs:', error);
+      console.error('❌ Error fetching smart recommendations:', error);
     } finally {
       setIsFetchingMore(false);
     }
@@ -433,6 +515,7 @@ const handleNext = async () => {
     setIsPlaying(true);
     setLastPlayedSongDismissed(false);
     recordListeningHistory(nextSong.id);
+    setSongStartTime(new Date());
 
     // Add to listened songs and log
     setListenedSongs(prev => {
@@ -455,11 +538,26 @@ const handleNext = async () => {
     }
 
   } else {
-    // If we've reached the end of personalized list, get new recommendations
+    // If we've reached the end of personalized list, get new smart recommendations
     if (user && currentSong) {
       try {
-        console.log('🔄 Fetching new recommendations at end of list');
-        const newRecs = await getPersonalizedSongs(user.id, currentSong, listenedSongs);
+        console.log('🧠 Reached end of list, fetching new smart recommendations');
+        
+        let newRecs: Song[] = [];
+        
+        // Use smart recommendations if we have listened songs in current batch
+        if (currentBatchListenedSongs.length > 0) {
+          console.log('🧠 Using smart recommendations for new batch');
+          newRecs = await getSmartPersonalizedSongs(
+            user.id, 
+            currentBatchListenedSongs, 
+            listenedSongs
+          );
+        } else {
+          console.log('🎵 Using regular recommendations for new batch');
+          newRecs = await getPersonalizedSongs(user.id, currentSong, listenedSongs);
+        }
+        
         const filtered = newRecs.filter(song => 
           !playedSongs.has(song.file_id.toString()) &&
           !listenedSongs.has(song.file_id.toString())
@@ -467,10 +565,11 @@ const handleNext = async () => {
         
         if (filtered.length > 0) {
           const nextSong = filtered[0];
-          updated.add(nextSong.file_id.toString());
+          setCurrentSong(nextSong);
           setIsPlaying(true);
           setLastPlayedSongDismissed(false);
           recordListeningHistory(nextSong.id);
+          setSongStartTime(new Date());
           
           // Add to listened songs and log
           setListenedSongs(prev => {
@@ -484,6 +583,8 @@ const handleNext = async () => {
           const newPersonalizedList = [nextSong, ...filtered.slice(1, 5)];
           setPersonalizedList(newPersonalizedList);
           setCurrentSongIndex(0);
+          setBatchStartIndex(0);
+          setCurrentBatchListenedSongs([]); // Reset batch for new recommendations
           
           setPlayedSongs((prev) => {
             const updated = new Set(prev);
@@ -497,12 +598,12 @@ const handleNext = async () => {
             setImageUrls(prev => ({ ...prev, [nextSong.img_id]: newUrl }));
           }
           
-          console.log('✅ New recommendations loaded:', newPersonalizedList.length, 'songs');
+          console.log('✅ New smart recommendations loaded:', newPersonalizedList.length, 'songs');
         } else {
-          console.warn('⚠️ No more recommendations available');
+          console.warn('⚠️ No more smart recommendations available');
         }
       } catch (error) {
-        console.error('❌ Error fetching new recommendations:', error);
+        console.error('❌ Error fetching new smart recommendations:', error);
       }
     }
   }
@@ -526,6 +627,24 @@ const handleNext = async () => {
   };
 
   const handleSongEnd = async () => {
+    // Record if song was listened to completely (assume >20 seconds if it ended naturally)
+    if (currentSong && songStartTime) {
+      const listenDuration = (new Date().getTime() - songStartTime.getTime()) / 1000;
+      console.log(`🎵 Song "${currentSong.name}" ended after ${listenDuration.toFixed(1)} seconds`);
+      
+      if (listenDuration > 20) {
+        setCurrentBatchListenedSongs(prev => {
+          const exists = prev.some(s => s.file_id === currentSong.file_id);
+          if (!exists) {
+            const updated = [...prev, currentSong];
+            console.log('🎵 Current batch listened songs:', updated.map(s => s.name));
+            return updated;
+          }
+          return prev;
+        });
+      }
+    }
+    
     // When a song ends, automatically play the next one
     await handleNext();
 };
